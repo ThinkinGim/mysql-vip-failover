@@ -1,0 +1,140 @@
+#!/bin/bash
+#
+# mfo: This shell script monitors a mysql group made up with one master and multiple replicas.
+# description: mysql failover daemon
+# processname: mysqlfailover
+# created by: thinkingim
+# modified by: thinkingim
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+# Source networking configuration.
+. /etc/sysconfig/network
+
+. /opt/mfo/common.sh
+
+export MYSQL_TEST_LOGIN_FILE=/home/secuser/.mylogin.cnf
+
+exec=/usr/bin/mysqlfailover
+prog=$(basename $exec)
+
+basedir=/opt/mfo
+pidfile=/opt/mfo/mfo.pid
+logfile=/log/mfo/mfo.log
+
+master_conn=$admin_user:$admin_pass@$master_pip:$master_port
+discover_conn=$admin_user:$admin_pass
+rpl_conn=$admin_user:$admin_pass
+
+interval=5
+ping=3
+failover_mode=auto
+exec_before=$basedir/before.sh
+exec_after=$basedir/after.sh
+exec_post=$basedir/post.sh
+
+start() {
+  pid=`pgrep $prog`
+  stopped=$?
+  if [[ -f $pidfile ]]; then
+    if [[ $stopped == 0 ]]; then
+      echo "$pidfile exists, process is already running"
+      ret=$?
+    else
+      rm $pidfile
+    fi
+  else
+  if [ -z "$2" ]; then
+    echo ""
+  else
+    failover_mode=$2
+  fi
+    echo "master_conn: $admin_user@$master_pip:$master_port"
+    echo "failover-mode = $failover_mode"
+    echo "Starting $prog: "
+    cmd=$1
+    $exec \
+      --master=$master_conn \
+      --discover-slaves-login=$discover_conn \
+      --rpl-user=$rpl_conn \
+      --pidfile=$pidfile \
+      --log=$logfile \
+      --interval=$interval \
+      --ping=$ping \
+      --timeout=30 \
+      --failover-mode=$failover_mode \
+      --daemon=$cmd \
+      --exec-before=$exec_before \
+      --exec-after=$exec_after \
+      --exec-post=$exec_post \
+      --force \
+      -vv
+    ret=$?
+    if [[ $ret -eq 0 ]]; then
+      while [[ ! -f $pidfile ]]; do
+        echo "Waiting for $prog to be started ..."
+        sleep 1
+      done
+      pid=$(cat $pidfile)
+      if [[ -x /proc/$pid ]]; then
+        echo "$prog started"
+        ret=$?
+      fi
+    fi
+  fi
+  return $ret
+}
+
+stop() {
+  if [[ ! -f $pidfile ]]; then
+    echo "pidfile $pidfile does not exist, process is not running"
+  else
+    echo "Stopping $prog: "
+    pid=$(cat $pidfile)
+    cmd=$1
+    $exec --pidfile=$pidfile --log=$logfile --daemon=$cmd -vv
+    while [[ -x /proc/$pid ]]; do
+      echo "Waiting for $prog to be stopped ..."
+      sleep 1
+    done
+    echo "$prog stopped"
+  fi
+  ret=$?
+  return $ret
+}
+
+show () {
+  /usr/bin/mysqlrplshow --master=$master_conn --discover-slaves-login=$discover_conn --recurse --max-depth=0 -vv --quiet --show-list --format=tab
+}
+
+for i in "$@"
+do
+case "$i" in
+  start | restart | stop)
+    CMD=$i
+    ;;
+  status)
+    show
+    status -p "$pidfile" $prog
+    ;;
+  -m=*|--mode=*)
+    FAILOVER_MODE="${i#*=}"
+    shift
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|status|restart}"
+    exit 2
+esac
+done
+
+case $CMD in
+  start | restart)
+    start $CMD $FAILOVER_MODE
+    ;;
+  stop)
+    stop $CMD
+    ;;
+esac
+
+exit $?
